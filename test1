@@ -1,0 +1,181 @@
+import streamlit as st
+from supabase import create_client, Client
+from google import genai
+import re
+
+# 1. Official Page Styling & Config
+st.set_page_config(
+    page_title="Campus Central Lost & Found Portal",
+    page_icon="🎓",
+    layout="wide"
+)
+
+# 2. Database & AI Initialization
+# Use st.secrets in production or paste keys directly for hackathon demo
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "https://pxafansqbczelczgrtbc.supabase.co")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB4YWZhbnNxYmN6ZWxjemdydGJjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY5NTk2ODksImV4cCI6MjEwMjUzNTY4OX0.YggPuITtbpabwN7KtOfL2059k-iW259X9_kvQibO6gM")
+GEMINI_KEY = st.secrets.get("GEMINI_KEY", "AIzaSyAU_i2_Tn8lIHcZcafqXqVvHxum70-9hnQ")
+
+@st.cache_resource
+def init_connections():
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    ai_client = genai.Client(api_key=GEMINI_KEY)
+    return supabase, ai_client
+
+try:
+    db, ai_client = init_connections()
+except Exception as e:
+    st.error(f"Database connection error: {e}")
+
+# Email Validator Helper
+def is_valid_student_email(email):
+    # Allows standard institutional student formats
+    pattern = r"^[a-zA-Z0-9_.+-]+@([a-zA-Z0-9-]+\.)*(vitstudent\.ac\.in|edu|ac\.in)$"
+    return re.match(pattern, email) is not None
+
+# 3. App Header
+st.title("🎓 Official Campus Lost, Found & Asset Recovery Portal")
+st.caption("Institutional Registry & AI-Assisted Retrieval Network • Student Welfare & Security Desk")
+
+# Sidebar: User Session / Role Selector
+with st.sidebar:
+    st.header("🔑 Student Authentication")
+    user_email = st.text_input("Institutional Email ID", placeholder="name.regno@vitstudent.ac.in")
+    user_role = st.radio("Access Level", ["Student", "Security Desk Admin"])
+    
+    admin_pin = ""
+    if user_role == "Security Desk Admin":
+        admin_pin = st.text_input("Security Access PIN", type="password")
+
+# 4. Navigation Tabs
+tab_search, tab_report, tab_feed, tab_admin = st.tabs([
+    "🔍 AI Smart Retrieval", 
+    "➕ Report Item / Asset", 
+    "📋 Active Registry Feed",
+    "🛡️ Administrative Console"
+])
+
+# ==================== TAB 1: AI SMART MATCH ====================
+with tab_search:
+    st.subheader("Automated Semantic Inventory Scan")
+    st.write("Enter an unstructured description of what you lost. Gemini will scan registered campus deposits for potential matches.")
+    
+    query = st.text_area("Item Description & Context", placeholder="e.g., Left a dark blue Dell laptop bag with a Casio calculator inside SJT 4th floor near room 412.")
+    
+    if st.button("Run AI Matcher", type="primary"):
+        if not query.strip():
+            st.warning("Please provide descriptive keywords.")
+        else:
+            with st.spinner("Querying institutional database with Gemini..."):
+                response = db.table("campus_inventory").select("*").eq("status", "Unclaimed").execute()
+                items = response.data
+                
+                if not items:
+                    st.info("No unclaimed items currently registered in the database.")
+                else:
+                    context = "\n".join([
+                        f"ID: {i['id']} | Category: {i['category']} | Title: {i['item_title']} | Zone: {i['campus_zone']} | Details: {i['description']}" 
+                        for i in items
+                    ])
+                    
+                    prompt = f"""
+                    You are an official campus lost-and-found matching system.
+                    Current Active Inventory:
+                    {context}
+
+                    User Query: "{query}"
+
+                    Instructions:
+                    1. Check if any item in the inventory likely matches the query.
+                    2. If a match exists, output the Item ID, Title, Campus Zone, and instructions to visit the Security Desk to claim.
+                    3. If no clear match is found, provide a list of nearest security desks for the mentioned campus zone.
+                    4. Maintain a formal, official tone.
+                    """
+                    
+                    try:
+                        ai_res = ai_client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=prompt
+                        )
+                        st.success("Analysis Complete")
+                        st.markdown(ai_res.text)
+                    except Exception as e:
+                        st.error(f"AI Service Error: {e}")
+
+# ==================== TAB 2: REPORT ITEM ====================
+with tab_report:
+    st.subheader("Official Deposit & Incident Report")
+    
+    if not user_email or not is_valid_student_email(user_email):
+        st.warning("⚠️ Please provide a valid institutional email (@vitstudent.ac.in or @ac.in) in the sidebar to file a report.")
+    else:
+        with st.form("official_report_form", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                cat = st.selectbox("Record Type", ["Found Item (Handed In)", "Lost Incident", "Resource for Student Redistribution"])
+                title = st.text_input("Item Designation / Name *", placeholder="e.g., Casio Scientific Calculator FX-991CW")
+                zone = st.selectbox("Campus Zone / Block *", [
+                    "SJT (Silver Jubilee Tower)", "TT (Technology Tower)", "MB (Main Building)", 
+                    "PRP Block", "Central Library", "Foodys / Gazebo", "Men's Hostels", "Ladies Hostels"
+                ])
+            with c2:
+                contact = st.text_input("Contact Number *", placeholder="10-digit mobile number")
+                secret_detail = st.text_input("Verification Marker (Private)", placeholder="e.g., Specific sticker or lock pattern (Used to verify owner)")
+                desc = st.text_area("Public Description *", placeholder="Mention color, brand, condition, and where it was deposited.")
+
+            submit = st.form_submit_button("Register Record in Official Database")
+            if submit:
+                if title and contact and desc:
+                    record = {
+                        "category": cat,
+                        "item_title": title,
+                        "campus_zone": zone,
+                        "finder_email": user_email,
+                        "contact_num": contact,
+                        "description": desc,
+                        "status": "Unclaimed",
+                        "verification_hint": secret_detail
+                    }
+                    db.table("campus_inventory").insert(record).execute()
+                    st.success("Record successfully logged in the campus inventory system.")
+                else:
+                    st.error("Please fill in all mandatory fields (*).")
+
+# ==================== TAB 3: PUBLIC REGISTRY FEED ====================
+with tab_feed:
+    st.subheader("Public Asset Registry")
+    res = db.table("campus_inventory").select("id, created_at, category, item_title, campus_zone, description, status").execute()
+    data = res.data
+    
+    if data:
+        st.dataframe(data, use_container_width=True)
+    else:
+        st.info("No active records to display.")
+
+# ==================== TAB 4: ADMIN CONSOLE ====================
+with tab_admin:
+    st.subheader("Security & Warden Operations Console")
+    if user_role != "Security Desk Admin" or admin_pin != "1234": # Demo PIN
+        st.error("🔒 Restricted Area. Select 'Security Desk Admin' in sidebar and enter PIN (Demo PIN: 1234).")
+    else:
+        st.success("Administrative privileges authenticated.")
+        admin_res = db.table("campus_inventory").select("*").execute()
+        all_records = admin_res.data
+        
+        if all_records:
+            for item in all_records:
+                with st.expander(f"Record #{item['id']}: {item['item_title']} ({item['status']})"):
+                    st.write(f"**Campus Zone:** {item['campus_zone']}")
+                    st.write(f"**Finder Email:** {item['finder_email']} | **Contact:** {item['contact_num']}")
+                    st.write(f"**Public Description:** {item['description']}")
+                    st.warning(f"**Confidential Verification Marker:** {item.get('verification_hint', 'None provided')}")
+                    
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        if st.button(f"Mark as Resolved / Claimed", key=f"res_{item['id']}"):
+                            db.table("campus_inventory").update({"status": "Resolved"}).eq("id", item['id']).execute()
+                            st.rerun()
+                    with col_b:
+                        if st.button(f"Delete Entry", key=f"del_{item['id']}"):
+                            db.table("campus_inventory").delete().eq("id", item['id']).execute()
+                            st.rerun()
